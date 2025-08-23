@@ -1,0 +1,12 @@
+[package]
+name = "hyper-wordle"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lazy_static = "1.5.0"
+lstsq = "0.7.0"
+partial_sort = "1.0.0"
+rand = "0.9.2"
+roaring = "0.11.2"
+serde = {version = "1.0.219", features = ["derive"]}
