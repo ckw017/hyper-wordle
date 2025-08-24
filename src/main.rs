@@ -1,14 +1,13 @@
-
-use std::cell::RefCell;
-use std::io::{self, BufRead};
-use std::fs::File;
-use std::path::Path;
-use std::collections::{HashMap};
-use serde::Serialize;
 use roaring::RoaringBitmap;
+use serde::Serialize;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, BufRead};
+use std::path::Path;
 
-use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use rand::seq::SliceRandom;
 #[macro_use]
 extern crate lazy_static;
 extern crate partial_sort;
@@ -60,18 +59,14 @@ fn load_hint_lookup() -> Vec<u8> {
 }
 
 lazy_static! {
-
     static ref INDEX2WORD: Vec<String> = load_index_word_lookups().0;
     static ref WORD2INDEX: HashMap<String, u16> = load_index_word_lookups().1;
     static ref LIST_SIZE: usize = INDEX2WORD.len();
     static ref ALL_WORDS: Vec<u16> = (0..INDEX2WORD.len() as u16).collect();
     static ref SECRETS: Vec<u16> = load_secrets();
     static ref NUM_SECRETS: usize = SECRETS.len();
-
     static ref HINT_LOOKUP: Vec<u8> = load_hint_lookup();
 }
-
-
 
 #[inline(always)]
 fn get_feedback(secret: u16, guess: u16) -> u8 {
@@ -269,16 +264,24 @@ fn run_trial(rng: &mut rand::rngs::StdRng, cache: &mut CacheType) {
     // let starting_words: [&str; 2] = ["salet", "reast"];
     // let starting_words: [&str; 1] = ["salet"];
     // let starting_words: [&str; 1] = ["reast"];
-    let starting_words: [&str; 10] = ["salet", "reast", "crate", "trace", "slate", "crane", "carle", "slane", "carte", "torse"];
+    let starting_words: [&str; 10] = [
+        "salet", "reast", "crate", "trace", "slate", "crane", "carle", "slane", "carte", "torse",
+    ];
     // let starting_words: [&str; 7] = ["salet", "reast", "crate", "trace", "carle", "slane", "torse"];
     // let starting_words: [&str; 15] = ["salet", "reast", "crate", "trace", "slate", "crane", "carle", "slane", "carte", "torse", "slant", "trice", "least", "trine", "prate"];
-    let group_size = SECRETS.len() / starting_words.len() + if SECRETS.len() % starting_words.len() != 0 {1} else {0};
+    let group_size = SECRETS.len() / starting_words.len()
+        + if SECRETS.len() % starting_words.len() != 0 {
+            1
+        } else {
+            0
+        };
     let enable_conjugates_pruning = true;
     let mut secret_perm: Vec<u16> = SECRETS.clone();
     secret_perm.shuffle(rng);
 
     // Maps observations to a bitmap containing the possible words that match those observations.
-    let mut observation_map: HashMap<Vec<Observation>, Box<RefCell<RoaringBitmap>>> = HashMap::new();
+    let mut observation_map: HashMap<Vec<Observation>, Box<RefCell<RoaringBitmap>>> =
+        HashMap::new();
     // Maps observations to count of how many times we see that see that observation over the 2315 words.
     let mut observation_count: HashMap<Vec<Observation>, u16> = HashMap::new();
     // Observations we've seen so far at each of the 2315 positions.
@@ -298,13 +301,16 @@ fn run_trial(rng: &mut rand::rngs::StdRng, cache: &mut CacheType) {
     // Initial guesses by mixing our starting words across the 2315 positions
     let mut guesses = vec![];
     for i in 0..SECRETS.len() {
-        guesses.push(WORD2INDEX[starting_words[std::cmp::min(starting_words.len() - 1, i / group_size)]])
+        guesses.push(
+            WORD2INDEX[starting_words[std::cmp::min(starting_words.len() - 1, i / group_size)]],
+        )
     }
 
     // Keep going until everything is solved
     while solved_count != SECRETS.len() {
         solved_count = 0;
-        let mut new_observation_map: HashMap<Vec<Observation>, Box<RefCell<RoaringBitmap>>> = HashMap::new();
+        let mut new_observation_map: HashMap<Vec<Observation>, Box<RefCell<RoaringBitmap>>> =
+            HashMap::new();
         let mut new_observation_count: HashMap<Vec<Observation>, u16> = HashMap::new();
         for i in 0..SECRETS.len() {
             let guess = guesses[i];
@@ -315,7 +321,7 @@ fn run_trial(rng: &mut rand::rngs::StdRng, cache: &mut CacheType) {
             } else {
                 misses += 1;
             }
-            let observation = Observation{
+            let observation = Observation {
                 guess: guess,
                 feedback: feedback,
             };
@@ -346,7 +352,10 @@ fn run_trial(rng: &mut rand::rngs::StdRng, cache: &mut CacheType) {
             for observation in &observations {
                 let mut total_superset_of = 0;
                 for observation2 in &observations {
-                    if new_observation_map[observation].borrow().is_superset(&new_observation_map[observation2].borrow()) {
+                    if new_observation_map[observation]
+                        .borrow()
+                        .is_superset(&new_observation_map[observation2].borrow())
+                    {
                         total_superset_of += new_observation_count[observation2];
                     }
                 }
@@ -383,12 +392,16 @@ fn run_trial(rng: &mut rand::rngs::StdRng, cache: &mut CacheType) {
         // Update guesses
         for i in 0..SECRETS.len() {
             let secret_subset = observation_map[&observations[i]].borrow();
-            let (strat, _) = optimize(&secret_subset.iter().map(|x| x as u16).collect(), &ALL_WORDS, 0, cache);
+            let (strat, _) = optimize(
+                &secret_subset.iter().map(|x| x as u16).collect(),
+                &ALL_WORDS,
+                0,
+                cache,
+            );
             guesses[i] = strat.guess;
         }
     }
     println!("{}", misses + solved_count)
-
 }
 
 fn main() {
