@@ -1,7 +1,8 @@
 use roaring::RoaringBitmap;
 use serde::Serialize;
+use core::f64;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::path::Path;
@@ -16,10 +17,10 @@ use partial_sort::PartialSort;
 
 const NUM_HINTS: u8 = 3_u8.pow(5);
 const MATCHING_HINT: u8 = NUM_HINTS - 1;
-const PARTITION_INIT: Option<Vec<u16>> = None;
+const PARTITION_INIT: Option<Vec<(u16, u64)>> = None;
 const BIG_YOSHI: usize = usize::MAX / 2;
 const NUM_TRIALS: usize = 1000;
-const BEAM_WIDTH: usize = 80;
+const BEAM_WIDTH: usize = 20;
 
 fn load_index_word_lookups() -> (Vec<String>, HashMap<String, u16>) {
     let path = Path::new("words/wordlist.txt");
@@ -73,7 +74,7 @@ fn get_feedback(secret: u16, guess: u16) -> u8 {
     HINT_LOOKUP[guess as usize * INDEX2WORD.len() + secret as usize]
 }
 
-type CacheType = HashMap<Vec<u16>, (Strategy, usize)>;
+type CacheType = HashMap<Vec<(u16, u64)>, (Strategy, f64)>;
 
 #[derive(Clone, Serialize)]
 struct Strategy {
@@ -91,46 +92,55 @@ impl Strategy {
 }
 
 struct Partitions {
-    partitions: [Option<Vec<u16>>; NUM_HINTS as usize],
+    partitions: [Option<Vec<(u16, u64)>>; NUM_HINTS as usize],
+    weighted_partition_counts: [u64; NUM_HINTS as usize],
     count: usize,
+    weighted_count: u64,
 }
 
 impl Partitions {
-    fn from_targets(targets: &Vec<u16>, guess: u16) -> Partitions {
+    fn from_targets(targets: &Vec<(u16, u64)>, guess: u16) -> Partitions {
         let mut p = Partitions {
             partitions: [PARTITION_INIT; NUM_HINTS as usize],
+            weighted_partition_counts: [0; NUM_HINTS as usize],
             count: 0,
+            weighted_count: 0,
         };
         for secret in targets.iter() {
-            let hint = get_feedback(*secret, guess);
+            let hint = get_feedback(secret.0, guess);
             if p.partitions[hint as usize] == None {
                 p.partitions[hint as usize] = Some(Vec::new());
                 p.count += 1;
             }
             p.partitions[hint as usize].as_mut().unwrap().push(*secret);
+            p.weighted_count += secret.1;
+            p.weighted_partition_counts[hint as usize] += secret.1;
         }
         return p;
     }
 }
 
 struct CountingPartitions {
-    partitions: [u16; NUM_HINTS as usize],
+    partitions: [u64; NUM_HINTS as usize],
     count: usize,
+    weighted_count: u64,
 }
 
 impl CountingPartitions {
-    fn from_targets(targets: &Vec<u16>, guess: u16) -> CountingPartitions {
+    fn from_targets(targets: &Vec<(u16, u64)>, guess: u16) -> CountingPartitions {
         let mut p = CountingPartitions {
             partitions: [0; NUM_HINTS as usize],
             count: 0,
+            weighted_count: 0,
         };
         for secret in targets.iter() {
-            let hint = get_feedback(*secret, guess);
+            let hint = get_feedback((*secret).0, guess);
             if p.partitions[hint as usize] == 0 {
                 p.count += 1;
             }
             let c = &mut p.partitions[hint as usize];
-            *c += 1;
+            *c += secret.1;
+            p.weighted_count += secret.1;
         }
         return p;
     }
@@ -138,12 +148,13 @@ impl CountingPartitions {
     fn heuristic(&self) -> f32 {
         let mut result = 0.0_f32;
         for i in 0..NUM_HINTS {
-            let p = self.partitions[i as usize].clone() as f32;
+            let mut p = self.partitions[i as usize] as f32;
             if p == 0.0 {
                 continue;
             }
+            p = p / (self.weighted_count as f32);
             if i == MATCHING_HINT {
-                result -= p;
+                continue;
             }
             result += p.ln() * p
         }
@@ -152,17 +163,17 @@ impl CountingPartitions {
 }
 
 fn optimize(
-    secrets: &Vec<u16>,
+    secrets: &Vec<(u16, u64)>,
     choices: &Vec<u16>,
     depth: usize,
     cache: &mut CacheType,
-) -> (Strategy, usize) {
+) -> (Strategy, f64) {
     if secrets.len() == 1 {
         let strat = Strategy {
-            guess: secrets[0],
+            guess: secrets[0].0,
             children: Box::new(HashMap::new()),
         };
-        return (strat, 1);
+        return (strat, 1.0);
     }
     if cache.contains_key(secrets) {
         return cache[secrets].clone();
@@ -170,18 +181,17 @@ fn optimize(
     let num_secrets = secrets.len();
     let mut found_best = false;
     // When three or less options, always optimal to try guessing one of the choices
-    let choices = if secrets.len() <= 3 { secrets } else { choices };
+    let choices = if secrets.len() <= 3 { &secrets.iter().map(|x|(x).0).collect() } else { choices };
     let mut guess_partitions = Vec::with_capacity(choices.len());
-    let secret_set = std::collections::HashSet::<u16>::from_iter(secrets.clone());
 
     // Initial pass: look for perfect splitter
-    for guess in secrets.iter() {
+    for (guess, weight) in secrets.iter() {
         let partitions: CountingPartitions = CountingPartitions::from_targets(secrets, *guess);
         if partitions.count <= 1 {
             // No information introduced
             continue;
         }
-        if partitions.count == num_secrets {
+        if partitions.count == num_secrets && *weight == 10000 {
             guess_partitions.clear();
             guess_partitions.push((partitions.heuristic(), *guess));
             found_best = true;
@@ -194,9 +204,6 @@ fn optimize(
     // Second pass: try everything else
     if !found_best {
         for guess in choices.iter() {
-            if secret_set.contains(guess) {
-                continue;
-            }
             let partitions = CountingPartitions::from_targets(secrets, *guess);
             if partitions.count <= 1 {
                 // No information introduced
@@ -213,7 +220,7 @@ fn optimize(
     }
     let top_n = std::cmp::min(BEAM_WIDTH, guess_partitions.len());
     guess_partitions.partial_sort(top_n, |a, b| a.0.partial_cmp(&b.0).unwrap());
-    let mut best_total_depth = BIG_YOSHI;
+    let mut best_total_depth = f64::MAX;
     let mut best_strategy = Strategy::new();
     for (_, guess) in guess_partitions.iter().take(top_n) {
         let mut strategy = Strategy {
@@ -222,13 +229,13 @@ fn optimize(
         };
         let partitions = Partitions::from_targets(secrets, *guess);
 
-        let mut total_depth = 0;
+        let mut total_depth = 0.0;
         for i in 0..NUM_HINTS {
-            let sub_targets = &partitions.partitions[i as usize];
-            if *sub_targets == None {
+            let sub_secrets = &partitions.partitions[i as usize];
+            if *sub_secrets == None {
                 continue;
             }
-            let sub_secrets = sub_targets.as_ref().unwrap();
+            let sub_secrets = sub_secrets.as_ref().unwrap();
             let result;
             if cache.contains_key(sub_secrets) {
                 let cached = cache[sub_secrets].clone();
@@ -240,11 +247,11 @@ fn optimize(
             let sub_depth = result.1;
 
             if i != MATCHING_HINT {
-                total_depth += sub_depth;
+                total_depth += (partitions.weighted_partition_counts[i as usize] as f64 / partitions.weighted_count as f64) * (sub_depth as f64);
             }
             strategy.children.insert(i, result.0);
         }
-        total_depth += num_secrets;
+        total_depth += partitions.weighted_count as f64;
         if total_depth < best_total_depth {
             best_total_depth = total_depth;
             best_strategy = strategy;
@@ -399,7 +406,7 @@ fn run_trial(rng: &mut rand::rngs::StdRng, cache: &mut CacheType) {
                         secret_location.get_mut(&s).unwrap().push(observation.clone());
                     }
                 }
-                unique_secrets_at_location: HashMap<Vec<Observation>, Vec<u16>> = HashMap::new();
+                unique_secrets_at_location = HashMap::new();
                 for secret in secret_location.keys() {
                     if secret_location[secret].len() == 1 {
                         let loc = &secret_location[secret][0];
@@ -432,48 +439,40 @@ fn run_trial(rng: &mut rand::rngs::StdRng, cache: &mut CacheType) {
                 }
             }
         }
-
-        // println!("Starting fancy conjugate search");
-        // // Near conjugates sanity
-        // let observations_k = new_observation_map.keys().cloned().collect::<Vec<_>>();
-        // for observation in &observations_k {
-        //     let curr = new_observation_map[observation].borrow();
-        //     let curr_count = new_observation_count[observation];
-        //     if curr_count as u64 == curr.len() {
-        //         continue;
-        //     }
-        //     for observation2 in &observations_k {
-        //         if observation == observation2 {
-        //             continue;
-        //         }
-        //         let other = new_observation_map[observation2].borrow();
-        //         let other_count = new_observation_count[observation2];
-        //         let intersect = other.intersection_len(&curr);
-        //         if (other_count + curr_count) as u64 == (other.len() + curr.len()) {
-        //             println!("Fancy conjugate {} {} {} {} {}", curr_count, other_count, curr.len(), other.len(), intersect);
-        //         }
-        //     }
-        // }
-        // println!("Ending fancy conjugate search");
-
         let mut total = 0;
         for i in new_observation_count.values() {
             total += i;
         }
-        // println!("total={} conjugate={} uniqlo={} solved_count={} score={}", total, total_revised, total_uniqlo, solved_count, misses + solved_count);
+        println!("total={} conjugate={} uniqlo={} solved_count={} score={}", total, total_revised, total_uniqlo, solved_count, misses + solved_count);
         observation_map = new_observation_map;
         observation_count = new_observation_count;
 
+        let mut guess_mapping: HashMap<Vec<Observation>, u16> = HashMap::new();
+        for key in observation_map.keys() {
+            if guess_mapping.contains_key(key) {
+                continue;
+            }
+            let bitmap = observation_map[key].borrow();
+            let determined = unique_secrets_at_location.get(key).unwrap_or(&Vec::new()).iter().map(|x|*x).collect::<HashSet<u16>>();
+            let undetermined = bitmap.len() - determined.len() as u64;
+            let space = (observation_count[key] - (determined.len() as u16)) as u64;
+            if space != 0 && determined.len() > 0 {
+                println!("weight={} slots={} determined={} undetermined={} space={}", 10000 * space / undetermined, observation_count[key], determined.len(), undetermined, space);
+            }
+            let mut weighted_secrets: Vec<(u16, u64)> = Vec::new();
+            for secret in bitmap.iter() {
+                let mut weight = 10000;
+                if !determined.contains(&(secret as u16)) {
+                    weight = 10000 * space / undetermined;
+                }
+                weighted_secrets.push((secret as u16, weight));
+            }
+            guess_mapping.insert(key.clone(), optimize(&weighted_secrets, &ALL_WORDS, 0, cache).0.guess);
+        }
+
         // Update guesses
         for i in 0..SECRETS.len() {
-            let secret_subset = observation_map[&observations[i]].borrow();
-            let (strat, _) = optimize(
-                &secret_subset.iter().map(|x| x as u16).collect(),
-                &ALL_WORDS,
-                0,
-                cache,
-            );
-            guesses[i] = strat.guess;
+            guesses[i] = guess_mapping[&observations[i]];
         }
     }
     println!("{}", misses + solved_count)
