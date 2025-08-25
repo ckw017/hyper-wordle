@@ -275,7 +275,8 @@ fn run_trial(rng: &mut rand::rngs::StdRng, cache: &mut CacheType) {
         } else {
             0
         };
-    let enable_conjugates_pruning = true;
+    let enable_naked_candidates_pruning = true;
+    let enable_hidden_candidates_pruning = true;
     let mut secret_perm: Vec<u16> = SECRETS.clone();
     secret_perm.shuffle(rng);
 
@@ -343,49 +344,103 @@ fn run_trial(rng: &mut rand::rngs::StdRng, cache: &mut CacheType) {
             }
         }
 
-        // Prune naked conjugates
-        let mut info_gained = true;
-        let mut total_revised = 0;
-        while enable_conjugates_pruning && info_gained {
-            info_gained = false;
-            let observations = new_observation_map.keys().cloned().collect::<Vec<_>>();
-            for observation in &observations {
-                let mut total_superset_of = 0;
-                for observation2 in &observations {
-                    if new_observation_map[observation]
-                        .borrow()
-                        .is_superset(&new_observation_map[observation2].borrow())
-                    {
-                        total_superset_of += new_observation_count[observation2];
-                    }
-                }
-                let num_secrets = new_observation_map[observation].borrow().len() as u16;
-                if total_superset_of == num_secrets {
+
+        let mut total_naked_candidates = 0;
+        let mut total_hidden_candidates = 0;
+        loop {
+            let mut info_gained = false;
+            // Prune naked naked_candidates
+            if enable_naked_candidates_pruning {
+                let observations = new_observation_map.keys().cloned().collect::<Vec<_>>();
+                for observation in &observations {
+                    let mut total_superset_of = 0;
                     for observation2 in &observations {
-                        if observation2 == observation {
-                            continue;
-                        }
-                        let mut other_secrets = new_observation_map[observation2].borrow_mut();
-                        let secrets = new_observation_map[observation].borrow();
-                        if secrets.is_superset(&other_secrets) {
-                            continue;
-                        }
-                        for secret in secrets.iter() {
-                            let found = other_secrets.remove(secret);
-                            info_gained |= found;
-                            total_revised += found as u32;
+                        if new_observation_map[observation]
+                            .borrow()
+                            .is_superset(&new_observation_map[observation2].borrow())
+                        {
+                            total_superset_of += new_observation_count[observation2];
                         }
                     }
-                } else if total_superset_of > num_secrets {
-                    panic!("Shouldn't happen :D");
+                    let num_secrets = new_observation_map[observation].borrow().len() as u16;
+                    if total_superset_of == num_secrets {
+                        for observation2 in &observations {
+                            if observation2 == observation {
+                                continue;
+                            }
+                            let mut other_secrets = new_observation_map[observation2].borrow_mut();
+                            let secrets = new_observation_map[observation].borrow();
+                            if secrets.is_superset(&other_secrets) {
+                                continue;
+                            }
+                            for secret in secrets.iter() {
+                                let found = other_secrets.remove(secret);
+                                info_gained |= found;
+                                if found {
+                                    total_naked_candidates += new_observation_count[observation2];
+                                }
+                            }
+                        }
+                    } else if total_superset_of > num_secrets {
+                        panic!("Shouldn't happen :D");
+                    }
                 }
             }
+
+            if enable_hidden_candidates_pruning {
+                let mut secret_location: HashMap<u32, Vec<Vec<Observation>>> = HashMap::new();
+                let observations = new_observation_map.keys().cloned().collect::<Vec<_>>();
+                for observation in &observations {
+                    for s in new_observation_map[observation].borrow().iter() {
+                        if !secret_location.contains_key(&s) {
+                            secret_location.insert(s, Vec::new());
+                        }
+                        secret_location.get_mut(&s).unwrap().push(observation.clone());
+                    }
+                }
+                let mut unique_secrets_at_location = HashMap::new();
+                for secret in secret_location.keys() {
+                    if secret_location[secret].len() == 1 {
+                        let loc = &secret_location[secret][0];
+                        if !unique_secrets_at_location.contains_key(loc) {
+                            unique_secrets_at_location.insert(loc.clone(), Vec::new());
+                        }
+                        unique_secrets_at_location.get_mut(loc).unwrap().push((*secret) as u16);
+                    }
+                }
+
+                for observation in &observations {
+                    let num_positions = new_observation_count[observation];
+                    let maybe_there = unique_secrets_at_location.get(observation);
+                    if maybe_there.is_none() {
+                        continue
+                    }
+                    let there = maybe_there.unwrap();
+                    if num_positions == there.len() as u16 {
+                        let mut bitmap = new_observation_map.get_mut(observation).unwrap().borrow_mut();
+                        if bitmap.len() > num_positions as u64 {
+                            total_hidden_candidates += num_positions * (bitmap.len() as u16 - num_positions);
+                            // println!("Gaining {} from hidden_candidates", num_positions * (bitmap.len() as u16 - num_positions));
+                            info_gained = true;
+                            bitmap.clear();
+                            for secret in there {
+                                bitmap.insert((*secret) as u32);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !info_gained {
+                break;
+            }
         }
+
         let mut total = 0;
         for i in new_observation_count.values() {
             total += i;
         }
-        // println!("total={} total_revised={} solved_count={} score={}", total, total_revised, solved_count, misses + solved_count);
+        println!("total={} naked_candidates={} hidden_candidates={} solved_count={} score={}", total, total_naked_candidates, total_hidden_candidates, solved_count, misses + solved_count);
         observation_map = new_observation_map;
         observation_count = new_observation_count;
 
