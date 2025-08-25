@@ -343,49 +343,124 @@ fn run_trial(rng: &mut rand::rngs::StdRng, cache: &mut CacheType) {
             }
         }
 
-        // Prune naked conjugates
-        let mut info_gained = true;
+
+        let mut conjugate_info_gained = true;
+        let mut uniqlo_info_gained = true;
         let mut total_revised = 0;
-        while enable_conjugates_pruning && info_gained {
-            info_gained = false;
-            let observations = new_observation_map.keys().cloned().collect::<Vec<_>>();
-            for observation in &observations {
-                let mut total_superset_of = 0;
-                for observation2 in &observations {
-                    if new_observation_map[observation]
-                        .borrow()
-                        .is_superset(&new_observation_map[observation2].borrow())
-                    {
-                        total_superset_of += new_observation_count[observation2];
+        let mut total_uniqlo = 0;
+        let mut unique_secrets_at_location: HashMap<Vec<Observation>, Vec<u16>> = HashMap::new();
+        while conjugate_info_gained || uniqlo_info_gained {
+            // Prune naked conjugates
+            while enable_conjugates_pruning && conjugate_info_gained {
+                conjugate_info_gained = false;
+                let observations = new_observation_map.keys().cloned().collect::<Vec<_>>();
+                for observation in &observations {
+                    let mut total_superset_of = 0;
+                    for observation2 in &observations {
+                        if new_observation_map[observation]
+                            .borrow()
+                            .is_superset(&new_observation_map[observation2].borrow())
+                        {
+                            total_superset_of += new_observation_count[observation2];
+                        }
+                    }
+                    let num_secrets = new_observation_map[observation].borrow().len() as u16;
+                    if total_superset_of == num_secrets {
+                        for observation2 in &observations {
+                            if observation2 == observation {
+                                continue;
+                            }
+                            let mut other_secrets = new_observation_map[observation2].borrow_mut();
+                            let secrets = new_observation_map[observation].borrow();
+                            if secrets.is_superset(&other_secrets) {
+                                continue;
+                            }
+                            for secret in secrets.iter() {
+                                let found = other_secrets.remove(secret);
+                                conjugate_info_gained |= found;
+                                total_revised += found as u32;
+                            }
+                        }
+                    } else if total_superset_of > num_secrets {
+                        panic!("Shouldn't happen :D");
                     }
                 }
-                let num_secrets = new_observation_map[observation].borrow().len() as u16;
-                if total_superset_of == num_secrets {
-                    for observation2 in &observations {
-                        if observation2 == observation {
-                            continue;
+            }
+
+            while enable_conjugates_pruning && uniqlo_info_gained {
+                uniqlo_info_gained = false;
+                let mut secret_location: HashMap<u32, Vec<Vec<Observation>>> = HashMap::new();
+                let observations = new_observation_map.keys().cloned().collect::<Vec<_>>();
+                for observation in &observations {
+                    for s in new_observation_map[observation].borrow().iter() {
+                        if !secret_location.contains_key(&s) {
+                            secret_location.insert(s, Vec::new());
                         }
-                        let mut other_secrets = new_observation_map[observation2].borrow_mut();
-                        let secrets = new_observation_map[observation].borrow();
-                        if secrets.is_superset(&other_secrets) {
-                            continue;
+                        secret_location.get_mut(&s).unwrap().push(observation.clone());
+                    }
+                }
+                unique_secrets_at_location: HashMap<Vec<Observation>, Vec<u16>> = HashMap::new();
+                for secret in secret_location.keys() {
+                    if secret_location[secret].len() == 1 {
+                        let loc = &secret_location[secret][0];
+                        if !unique_secrets_at_location.contains_key(loc) {
+                            unique_secrets_at_location.insert(loc.clone(), Vec::new());
                         }
-                        for secret in secrets.iter() {
-                            let found = other_secrets.remove(secret);
-                            info_gained |= found;
-                            total_revised += found as u32;
+                        unique_secrets_at_location.get_mut(loc).unwrap().push((*secret) as u16);
+                    }
+                }
+
+                for observation in &observations {
+                    let num_positions = new_observation_count[observation];
+                    let maybe_there = unique_secrets_at_location.get(observation);
+                    if maybe_there.is_none() {
+                        continue
+                    }
+                    let there = maybe_there.unwrap();
+                    if num_positions == there.len() as u16 {
+                        let mut bitmap = new_observation_map.get_mut(observation).unwrap().borrow_mut();
+                        if bitmap.len() > num_positions as u64 {
+                            total_uniqlo += num_positions * (bitmap.len() as u16 - num_positions);
+                            // println!("Gaining {} from uniqlo", num_positions * (bitmap.len() as u16 - num_positions));
+                            uniqlo_info_gained = true;
+                            bitmap.clear();
+                            for secret in there {
+                                bitmap.insert((*secret) as u32);
+                            }
                         }
                     }
-                } else if total_superset_of > num_secrets {
-                    panic!("Shouldn't happen :D");
                 }
             }
         }
+
+        // println!("Starting fancy conjugate search");
+        // // Near conjugates sanity
+        // let observations_k = new_observation_map.keys().cloned().collect::<Vec<_>>();
+        // for observation in &observations_k {
+        //     let curr = new_observation_map[observation].borrow();
+        //     let curr_count = new_observation_count[observation];
+        //     if curr_count as u64 == curr.len() {
+        //         continue;
+        //     }
+        //     for observation2 in &observations_k {
+        //         if observation == observation2 {
+        //             continue;
+        //         }
+        //         let other = new_observation_map[observation2].borrow();
+        //         let other_count = new_observation_count[observation2];
+        //         let intersect = other.intersection_len(&curr);
+        //         if (other_count + curr_count) as u64 == (other.len() + curr.len()) {
+        //             println!("Fancy conjugate {} {} {} {} {}", curr_count, other_count, curr.len(), other.len(), intersect);
+        //         }
+        //     }
+        // }
+        // println!("Ending fancy conjugate search");
+
         let mut total = 0;
         for i in new_observation_count.values() {
             total += i;
         }
-        // println!("total={} total_revised={} solved_count={} score={}", total, total_revised, solved_count, misses + solved_count);
+        // println!("total={} conjugate={} uniqlo={} solved_count={} score={}", total, total_revised, total_uniqlo, solved_count, misses + solved_count);
         observation_map = new_observation_map;
         observation_count = new_observation_count;
 
